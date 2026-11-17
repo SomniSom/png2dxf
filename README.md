@@ -77,10 +77,10 @@ of a JSON request. All fields are optional.
   "ocr_min_conf": 35,
   "ocr_upscale": 2,
   "layers": {
-    "lines": "Линии",
-    "circles": "Окружности",
-    "arcs": "Дуги",
-    "polylines": "Полилинии"
+    "lines": "Lines",
+    "circles": "Circles",
+    "arcs": "Arcs",
+    "polylines": "Polylines"
   },
   "max_pixels": 120000000
 }
@@ -153,9 +153,20 @@ Key differences from the classic OpenCV pipeline:
 
 ## DXF layers
 
-Defaults: `Линии` (7), `Окружности` (1), `Дуги` (3), `Полилинии` (5), `Текст` (2),
-`Каркас` (8, only with `include_debug`). Names are overridable in `layers`.
-All coordinates are in mm, `$INSUNITS = 4`.
+Layer defaults are:
+
+| Layer | Colour | Contents |
+|---|---|---|
+| `Lines` | 7 | LINE entities |
+| `Circles` | 1 | CIRCLE entities |
+| `Arcs` | 3 | ARC entities |
+| `Polylines` | 5 | LWPOLYLINE entities |
+| `Text` | 2 | TEXT entities produced by OCR |
+| `Skeleton` | 8 | debug skeleton, only with `include_debug` |
+
+Every name is overridable through the `layers` object, so any naming can be set
+per request (see the JSON example above). All coordinates are in mm,
+`$INSUNITS = 4`.
 
 ## Performance
 
@@ -174,7 +185,7 @@ and batch processing across files (`rayon`).
 ## Limitations
 
 * **OCR works but is imperfect.** Tesseract (`-l rus`, two passes + block mode) writes
-  labels to the `Текст` layer. On GOST drafting fonts some characters are confused
+  labels to the `Text` layer. On GOST drafting fonts some characters are confused
   (`Ф`→`$`, `В`→`8`) and dense notes are read column by column. Tune with
   `ocr` / `ocr_min_conf` / `ocr_upscale`; without `tesseract` in the image the layer is
   empty and geometry is unaffected.
