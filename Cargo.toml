@@ -1,0 +1,29 @@
+[package]
+name = "png2dxf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Raster building drawings -> DXF vectorizer with HTTP API"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "tiff",
+    "bmp",
+    "webp",
+    "rayon",
+] }
+imageproc = { version = "0.25", features = ["rayon"] }
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tiny_http = "0.12"
+multipart = "0.18"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

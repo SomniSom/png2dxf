@@ -1,0 +1,10 @@
+/target
+/out
+*.dxf
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+png2dxf-bin
+.DS_Store
