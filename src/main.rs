@@ -20,6 +20,7 @@ mod pipeline;
 mod preprocess;
 mod render;
 mod server;
+mod synth;
 mod vectorize;
 mod zip;
 
@@ -45,6 +46,37 @@ fn main() {
         if let Err(e) = server::serve(cfg) {
             eprintln!("не удалось запустить сервер: {e}");
             std::process::exit(1);
+        }
+        return;
+    }
+
+    if head == "gen-test-image" {
+        let out = args.get(1).cloned().unwrap_or_else(|| "synthetic.png".into());
+        let w: u32 = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(1600);
+        let h: u32 = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(1100);
+        let (img, gt) = synth::make_sheet(w, h);
+        match image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_raw(
+            img.width(),
+            img.height(),
+            img.as_raw().clone(),
+        )
+        .map(|b| b.save(&out))
+        .unwrap_or_else(|| Err(image::ImageError::IoError(std::io::Error::other("buffer"))))
+        {
+            Ok(_) => {
+                println!(
+                    "{}: {}x{}, эталонных отрезков {}, окружностей {}",
+                    out,
+                    w,
+                    h,
+                    gt.segs.len(),
+                    gt.circles.len()
+                );
+            }
+            Err(e) => {
+                eprintln!("не удалось записать {out}: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }

@@ -108,10 +108,15 @@ pub fn vectorize_bytes(bytes: &[u8], params: &Params) -> Result<Output, Error> {
     // что подписи не «просачиваются» в геометрию. Удаление из геометрии —
     // отдельное решение (drop_text), по умолчанию выключено.
     let text = crate::preprocess::text_mask(&cleaned);
+    // Крупные текстовые абзацы (примечания, легенды) гасим всегда: они не дают
+    // геометрии, но детектор превращает их в десятки артефактных линий.
+    // Одиночные подписи и отметки остаются — они нужны для OCR и как привязки.
+    let (geom_blocks, dropped_px) = crate::preprocess::drop_block_areas(&cleaned, &text);
+    eprintln!("text blocks: погашено {} px", dropped_px);
     let geom = if params.drop_text {
-        crate::preprocess::remove_text(&cleaned, &text)
+        crate::preprocess::remove_text(&geom_blocks, &text)
     } else {
-        cleaned.clone()
+        geom_blocks
     };
     // Полутон для LSD-прохода: гасим текстовые пиксели в сером (белым),
     // а не просто отдаём исходный blur. Так детектор по градиентам не «грызёт»
@@ -143,6 +148,10 @@ pub fn vectorize_bytes(bytes: &[u8], params: &Params) -> Result<Output, Error> {
 
     let t1 = Instant::now();
     let mut data: VectorData = crate::vectorize::vectorize(&edges, Some(&gray_clean), params);
+    // Субпиксельное уточнение по полутону: сдвигаем отрезки на реальные оси штрихов.
+    if params.subpixel_refine {
+        crate::vectorize::refine_segments(&mut data.segs, &blurred, 4.0);
+    }
     eprintln!(
         "vectorize: {} segs, {} arcs, {} circles in {} ms",
         data.segs.len(),

@@ -250,10 +250,14 @@ fn hough_lines_with_stride(edges: &GrayImage, px: &Params, stride: usize) -> Vec
         }
     }
 
-    // Сначала обычное слияние плотных линий, затем сборка пунктира:
-    // короткие штрихи с зазорами до ~15 px становятся одной линией.
+    // Сначала обычное слияние плотных линий, затем сборка пунктира
+    // по цепочкам: штрихи группируются по направлению и вытягиваются в одну
+    // линию МНК по центрам. Одиночные штрихи возвращаются в общий список.
     let merged = merge_collinear(segs, angle_tol, px.max_gap_px as f64);
-    crate::geom::dash_merge(merged, angle_tol, 15.0, 45.0)
+    let (loose, chains) = crate::geom::dash_chains(merged, angle_tol, 16.0, 3);
+    let mut out = loose;
+    out.extend(chains);
+    out
 }
 
 /// Делит отрезок на куски, где под ним есть «чернила» (скелет).
@@ -855,5 +859,104 @@ mod tests {
     fn simplify_straight() {
         let pts: Vec<Pt> = (0..100).map(|i| Pt::new(i as f64, 0.0)).collect();
         assert_eq!(simplify(&pts, 1.0).len(), 2);
+    }
+}
+
+/// Субпиксельное уточнение отрезка по полутону.
+///
+/// Для каждого отрезка берём профиль яркости поперёк линии в нескольких
+/// точках и находим центр темной полосы (взвешенный по «чернильности»).
+/// Затем через уточнённые центры проводим МНК-прямую и проецируем на неё
+/// прежние концы. Это не добавляет новых линий, но сдвигает их на доли
+/// пикселя к реальной оси штриха — важно для точных размеров в смете.
+pub fn refine_segments(segs: &mut [Seg], gray: &GrayImage, half_band: f64) {
+    let (w, h) = gray.dimensions();
+    let (wi, hi) = (w as i64, h as i64);
+    for s in segs.iter_mut() {
+        let len = s.len();
+        if len < 12.0 {
+            continue;
+        }
+        let (ux, uy) = ((s.b.x - s.a.x) / len, (s.b.y - s.a.y) / len);
+        let (nx, ny) = (-uy, ux);
+        // Профили поперёк в точках вдоль линии (без крайних 15%).
+        let samples = ((len / 6.0).floor() as usize).clamp(3, 24);
+        let mut pts: Vec<(f64, f64)> = Vec::new(); // (проекция вдоль, смещение поперёк)
+        for k in 0..samples {
+            let t = len * (0.15 + 0.7 * k as f64 / (samples - 1) as f64);
+            let cx = s.a.x + ux * t;
+            let cy = s.a.y + uy * t;
+            let mut sum_w = 0.0;
+            let mut sum_o = 0.0;
+            let steps = (half_band * 4.0).ceil() as i64;
+            for step in -steps..=steps {
+                let off = step as f64 / 4.0;
+                if off.abs() > half_band {
+                    continue;
+                }
+                let x = (cx + nx * off).round() as i64;
+                let y = (cy + ny * off).round() as i64;
+                if x < 0 || y < 0 || x >= wi || y >= hi {
+                    continue;
+                }
+                let v = gray.get_pixel(x as u32, y as u32)[0] as f64;
+                // Чернильность: чем темнее, тем больше вес (фон ~250).
+                let weight = ((200.0 - v) / 200.0).max(0.0);
+                if weight > 0.05 {
+                    sum_w += weight;
+                    sum_o += off * weight;
+                }
+            }
+            if sum_w > 0.3 {
+                pts.push((t, sum_o / sum_w));
+            }
+        }
+        if pts.len() < 3 {
+            continue;
+        }
+        // МНК: смещение = k * t + b, где t — вдоль линии.
+        let n = pts.len() as f64;
+        let (mut st, mut so, mut stt, mut sto) = (0.0, 0.0, 0.0, 0.0);
+        for (t, o) in &pts {
+            st += t;
+            so += o;
+            stt += t * t;
+            sto += t * o;
+        }
+        let denom = n * stt - st * st;
+        if denom.abs() < 1e-9 {
+            continue;
+        }
+        let k = (n * sto - st * so) / denom;
+        let b = (so - k * st) / n;
+        // Поправка не должна «перетаскивать» линию больше чем на полосу.
+        if b.abs() > half_band || k.abs() * len > half_band * 2.0 {
+            continue;
+        }
+        let na = Pt::new(s.a.x + nx * b, s.a.y + ny * b);
+        let nb = Pt::new(s.b.x + nx * (b + k * len), s.b.y + ny * (b + k * len));
+        s.a = na;
+        s.b = nb;
+    }
+}
+
+#[cfg(test)]
+mod refine_tests {
+    use super::*;
+    use image::{GrayImage, Luma};
+
+    #[test]
+    fn snaps_line_to_ink_center() {
+        // Штрих толщиной 3 px по y=50.5, а отрезок нарисован по y=48.
+        let mut img = GrayImage::from_pixel(120, 90, Luma([255]));
+        for x in 10..110 {
+            for y in 49..52 {
+                img.put_pixel(x, y, Luma([20]));
+            }
+        }
+        let mut segs = vec![Seg { a: Pt::new(10.0, 48.0), b: Pt::new(110.0, 48.0), votes: 1 }];
+        refine_segments(&mut segs, &img, 4.0);
+        let cy = (segs[0].a.y + segs[0].b.y) / 2.0;
+        assert!(cy > 48.5 && cy < 52.0, "cy={cy}");
     }
 }

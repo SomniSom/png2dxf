@@ -24,12 +24,20 @@ pub fn grayscale_colored(src: &image::RgbaImage) -> GrayImage {
         let min = r.min(g).min(b) as f32;
         let sat = if max > 1.0 { (max - min) / max } else { 0.0 };
         let base = to_gray(*px) as f32;
-        // Насыщенный тон -> вычитаем долю яркости, оставляя линию тёмной.
-        let boost = 150.0 * sat;
+        // Осветлённый цветной тон (розовая граница участка) по яркости почти
+        // фон, но заметно цветной. Считаем его тёмным по насыщенности.
+        // Тёмные цветные пиксели уже тёмные — их не усиливаем.
+        let pale = (1.0 - base / 255.0) < 0.25;
+        let boost = if pale { 210.0 * sat } else { 70.0 * sat };
         let v = (base - boost).clamp(0.0, 255.0) as u8;
         out.put_pixel(x, y, Luma([v]));
     }
     out
+}
+
+/// Полутон как есть (для детекции по градиенту).
+pub fn to_luma(src: &image::RgbaImage) -> GrayImage {
+    grayscale(src)
 }
 
 pub fn grayscale(src: &image::RgbaImage) -> GrayImage {
@@ -370,4 +378,122 @@ pub fn mask_gray(gray: &GrayImage, text: &GrayImage) -> GrayImage {
         }
     }
     out
+}
+
+/// Гасит крупные «текстовые» куски растра (абзацы примечаний, легенды).
+///
+/// Блоки находятся по маске текста: маска уплотняется, группируется в строки
+/// и абзацы. Гасим только абзацы (несколько строк подряд) — одиночные подписи
+/// и отметки высот остаются, чтобы не терять мелкие элементы чертежа, а
+/// примечание перестаёт давать артефакты на слое линий.
+pub fn drop_block_areas(bin: &GrayImage, text: &GrayImage) -> (GrayImage, usize) {
+    let (w, h) = bin.dimensions();
+    let raw = text.as_raw();
+    let wu = w as usize;
+    let hu = h as usize;
+    // Уплотнение маски на 2 px в обе стороны: иначе буквы не собираются в
+    // слова, а соседние строки абзаца не слипаются (радиус только «вперёд»
+    // оставлял двойные разрывы, и блок не дотягивал до порога абзаца).
+    let mut dense = vec![0u8; wu * hu];
+    for y in 0..hu {
+        for x in 0..wu {
+            if raw[y * wu + x] > 0 {
+                for dy in -2i64..=2 {
+                    for dx in -2i64..=2 {
+                        let nx = x as i64 + dx;
+                        let ny = y as i64 + dy;
+                        if nx >= 0 && ny >= 0 && (nx as usize) < wu && (ny as usize) < hu {
+                            dense[ny as usize * wu + nx as usize] = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut visited = vec![false; wu * hu];
+    let mut out = bin.clone();
+    let mut dropped = 0usize;
+    let mut clusters: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for y in 0..hu {
+        for x in 0..wu {
+            let i = y * wu + x;
+            if visited[i] || dense[i] == 0 {
+                continue;
+            }
+            let mut stack = vec![(x, y)];
+            visited[i] = true;
+            let (mut x0, mut y0, mut x1, mut y1) = (x, y, x, y);
+            let mut pix: Vec<(usize, usize)> = Vec::new();
+            while let Some((cx, cy)) = stack.pop() {
+                pix.push((cx, cy));
+                x0 = x0.min(cx);
+                y0 = y0.min(cy);
+                x1 = x1.max(cx);
+                y1 = y1.max(cy);
+                for dy in -1i64..=1 {
+                    for dx in -1i64..=1 {
+                        let nx = cx as i64 + dx;
+                        let ny = cy as i64 + dy;
+                        if nx < 0 || ny < 0 || nx >= wu as i64 || ny >= hu as i64 {
+                            continue;
+                        }
+                        let ni = ny as usize * wu + nx as usize;
+                        if !visited[ni] && dense[ni] > 0 {
+                            visited[ni] = true;
+                            stack.push((nx as usize, ny as usize));
+                        }
+                    }
+                }
+            }
+            // Абзац: широкий и высокий кластер (несколько строк) — это
+            // примечание или легенда, а не одиночная подпись.
+            let bw = x1 - x0 + 1;
+            let bh = y1 - y0 + 1;
+            // Одиночная строка. Объединяем строки в абзац ниже по перекрытию
+            // по X — на реальных сканах слова строки разъезжаются на 1-2 px,
+            // и один связный кластер ни разу не дотягивает до абзаца.
+            clusters.push((x0, y0, x1, y1));
+        }
+    }
+    // Склейка кластеров в абзац: кластеры, перекрывающиеся по X и близкие
+    // по Y (зазор ≤ 1.2 высоты строки), считаются одним блоком.
+    clusters.sort_by_key(|c| c.1);
+    let mut blocks: Vec<(usize, usize, usize, usize, usize)> = Vec::new(); // +строк
+    for (cx0, cy0, cx1, cy1) in clusters {
+        let ch = cy1.saturating_sub(cy0) + 1;
+        let cw = cx1.saturating_sub(cx0) + 1;
+        let mut merged = false;
+        for b in blocks.iter_mut() {
+            let (bx0, by0, bx1, by1, n) = *b;
+            let gap_y = if cy0 > by1 { cy0 - by1 } else { 0 };
+            let x_overlap = cx1.min(bx1).saturating_sub(cx0.max(bx0)) + 1;
+            if gap_y <= (ch * 12) / 10 && x_overlap * 3 > cw.min(bx1 - bx0 + 1) {
+                b.0 = bx0.min(cx0);
+                b.1 = by0.min(cy0);
+                b.2 = bx1.max(cx1);
+                b.3 = by1.max(cy1);
+                b.4 = n + 1;
+                merged = true;
+                break;
+            }
+        }
+        if !merged {
+            blocks.push((cx0, cy0, cx1, cy1, 1));
+        }
+    }
+    // Блок примечаний/легенды: минимум 3 строки и заметная ширина.
+    for (bx0, by0, bx1, by1, n) in blocks {
+        let bw = bx1 - bx0 + 1;
+        if n >= 3 && bw >= 150 {
+            for y in by0..=by1 {
+                for x in bx0..=bx1 {
+                    if x < wu && y < hu {
+                        out.put_pixel(x as u32, y as u32, Luma([0]));
+                        dropped += 1;
+                    }
+                }
+            }
+        }
+    }
+    (out, dropped)
 }

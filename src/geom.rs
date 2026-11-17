@@ -338,84 +338,172 @@ mod tests {
     }
 }
 
-/// Собирает прерывистую (пунктирную) линию: короткие коллинеарные штрихи,
-/// идущие друг за другом с зазорами, объединяются в один отрезок.
+/// Пункт-центр штриха: середина отрезка и его длина.
+#[derive(Clone, Copy)]
+pub struct Dash {
+    pub c: Pt,
+    pub len: f64,
+    pub theta: f64,
+}
+
+/// Собирает пунктирные линии из штрихов по цепочкам.
 ///
-/// Отличие от `merge_collinear`: допускаются длинные зазоры (до `max_gap_len`),
-/// но не длиннее самого штриха — иначе «сшивались» бы далёкие элементы чертежа.
-pub fn dash_merge(segs: Vec<Seg>, angle_tol_rad: f64, max_gap_len: f64, max_short: f64) -> Vec<Seg> {
+/// Отличие от попарного слияния: штрихи группируются по направлению
+/// (гистограмма углов), внутри группы строятся цепочки «ближайший вдоль
+/// своей оси», а ось каждой цепочки уточняется МНК по центрам штрихов.
+/// Так собирается пунктир из десятка коротких штрихов под общим углом —
+/// попарное слияние такое не умеет и оставляет набор обрывков.
+pub fn dash_chains(segs: Vec<Seg>, angle_tol_rad: f64, max_gap: f64, min_chain: usize) -> (Vec<Seg>, Vec<Seg>) {
     if segs.len() < 2 {
-        return segs;
+        return (segs, Vec::new());
     }
     let sin_tol = angle_tol_rad.sin().max(1e-6);
-    let mut order: Vec<usize> = (0..segs.len()).collect();
-    order.sort_by(|&i, &j| segs[j].len().partial_cmp(&segs[i].len()).unwrap());
-    let mut used = vec![false; segs.len()];
-    let mut out: Vec<Seg> = Vec::with_capacity(segs.len());
-
-    for &i in &order {
-        if used[i] {
+    // Индекс штрихов: короткие — кандидаты в цепочки, длинные сразу в результат.
+    let mut long: Vec<Seg> = Vec::new();
+    let mut dashes: Vec<Dash> = Vec::new();
+    for s in &segs {
+        let l = s.len();
+        if l < 1e-9 {
             continue;
         }
-        used[i] = true;
-        let (mut a, mut b) = (segs[i].a, segs[i].b);
-        let mut votes = segs[i].votes;
+        if l > 60.0 {
+            long.push(*s);
+            continue;
+        }
+        dashes.push(Dash {
+            c: Pt::new((s.a.x + s.b.x) / 2.0, (s.a.y + s.b.y) / 2.0),
+            len: l,
+            theta: (s.b.y - s.a.y).atan2(s.b.x - s.a.x),
+        });
+    }
+    if dashes.len() < min_chain {
+        let mut all = long;
+        all.extend(dashes.iter().map(|d| dash_to_seg(d)));
+        return (all, Vec::new());
+    }
+
+    // Кластеризация по направлению: сетка 30° бинов со склейкой соседних.
+    let mut order: Vec<usize> = (0..dashes.len()).collect();
+    order.sort_by(|&i, &j| dashes[i].theta.partial_cmp(&dashes[j].theta).unwrap());
+    let mut used = vec![false; dashes.len()];
+    let mut chains: Vec<Seg> = Vec::new();
+
+    for idx in 0..order.len() {
+        let start = order[idx];
+        if used[start] {
+            continue;
+        }
+        // Направление кластера — угол первого штриха; ищем продолжения
+        // в пределах допуска и с поперечным смещением меньше max_gap.
+        used[start] = true;
+        let mut cs: Vec<usize> = vec![start];
+        let mut dir = dashes[start].theta;
+        let mut anchor = dashes[start].c;
         loop {
-            let len = a.dist(&b);
-            if len < 1e-9 {
-                break;
-            }
-            let d = ((b.x - a.x) / len, (b.y - a.y) / len);
-            let mut best: Option<(usize, f64, f64)> = None;
-            for j in 0..segs.len() {
+            let mut best: Option<(usize, f64)> = None;
+            for &j in &order {
                 if used[j] {
                     continue;
                 }
-                let s = segs[j];
-                if s.len() > max_short && s.len() > len * 0.5 {
+                let d = dashes[j];
+                let sin = (dir - d.theta).sin().abs();
+                if sin > sin_tol {
                     continue;
                 }
-                let sl = s.len().max(1e-9);
-                let sd = ((s.b.x - s.a.x) / sl, (s.b.y - s.a.y) / sl);
-                if (d.0 * sd.1 - d.1 * sd.0).abs() > sin_tol {
+                let dx = d.c.x - anchor.x;
+                let dy = d.c.y - anchor.y;
+                let along = dx * dir.cos() + dy * dir.sin();
+                let perp = (dx * dir.sin() - dy * dir.cos()).abs();
+                if perp > max_gap * 0.7 {
                     continue;
                 }
-                if d.0 * sd.0 + d.1 * sd.1 < 0.0 {
+                // Не заходим назад: цепочка растёт в одну сторону.
+                if along < -max_gap {
                     continue;
                 }
-                // Поперечное смещение концов штриха от оси линии.
-                let p_ax = pt_line_dist(&s.a, &a, &b);
-                let p_bx = pt_line_dist(&s.b, &a, &b);
-                if p_ax.max(p_bx) > max_gap_len * 0.6 {
-                    continue;
-                }
-                let t1 = (s.a.x - a.x) * d.0 + (s.a.y - a.y) * d.1;
-                let t2 = (s.b.x - a.x) * d.0 + (s.b.y - a.y) * d.1;
-                let (lo, hi) = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
-                let join = if lo > len { lo - len } else if hi < 0.0 { -hi } else { 0.0 };
-                if join > max_gap_len {
-                    continue;
-                }
-                let gain = hi.max(len) - lo.min(0.0);
-                if best.map_or(true, |(_, _, g)| gain > g) {
-                    best = Some((j, lo, hi));
+                let score = along + perp * 2.0;
+                if best.map_or(true, |(_, s0)| score < s0) {
+                    best = Some((j, score));
                 }
             }
             match best {
-                Some((j, lo, hi)) => {
+                Some((j, _)) => {
                     used[j] = true;
-                    votes = votes.max(segs[j].votes);
-                    // Расширяем отрезок вдоль его собственной оси.
-                    let o = Pt::new(a.x, a.y);
-                    let new_lo = lo.min(0.0);
-                    let new_hi = hi.max(len);
-                    a = Pt::new(o.x + d.0 * new_lo, o.y + d.1 * new_lo);
-                    b = Pt::new(o.x + d.0 * new_hi, o.y + d.1 * new_hi);
+                    let d = dashes[j];
+                    cs.push(j);
+                    // Уточняем направление и якорь по накопленной цепочке.
+                    let (nd, na) = fit_chain(&dashes, &cs);
+                    dir = nd;
+                    anchor = na;
                 }
                 None => break,
             }
         }
-        out.push(Seg { a, b, votes });
+        if cs.len() >= min_chain {
+            let seg = chain_to_seg(&dashes, &cs);
+            if seg.len() >= 10.0 {
+                chains.push(seg);
+                continue;
+            }
+        }
+        // Короткая цепочка: возвращаем штрихи как есть — пусть решает общий фильтр.
+        for j in cs {
+            long.push(dash_to_seg(&dashes[j]));
+        }
     }
-    out
+    (long, chains)
 }
+
+fn dash_to_seg(d: &Dash) -> Seg {
+    let h = d.len / 2.0;
+    Seg {
+        a: Pt::new(d.c.x - d.theta.cos() * h, d.c.y - d.theta.sin() * h),
+        b: Pt::new(d.c.x + d.theta.cos() * h, d.c.y + d.theta.sin() * h),
+        votes: 1,
+    }
+}
+
+/// МНК по центрам штрихов: направление и точка на оси.
+fn fit_chain(dashes: &[Dash], ids: &[usize]) -> (f64, Pt) {
+    let n = ids.len() as f64;
+    let (mut mx, mut my) = (0.0, 0.0);
+    for &i in ids {
+        mx += dashes[i].c.x;
+        my += dashes[i].c.y;
+    }
+    mx /= n;
+    my /= n;
+    let (mut sxx, mut sxy, mut syy) = (0.0, 0.0, 0.0);
+    for &i in ids {
+        let dx = dashes[i].c.x - mx;
+        let dy = dashes[i].c.y - my;
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+    }
+    // Главная ось ковариационной матрицы 2x2.
+    let theta = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    (theta, Pt::new(mx, my))
+}
+
+fn chain_to_seg(dashes: &[Dash], ids: &[usize]) -> Seg {
+    let (theta, c) = fit_chain(dashes, ids);
+    let (ux, uy) = (theta.cos(), theta.sin());
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &i in ids {
+        let d = &dashes[i];
+        let dx = d.c.x - c.x;
+        let dy = d.c.y - c.y;
+        let t = dx * ux + dy * uy;
+        let h = d.len / 2.0;
+        lo = lo.min(t - h);
+        hi = hi.max(t + h);
+    }
+    Seg {
+        a: Pt::new(c.x + ux * lo, c.y + uy * lo),
+        b: Pt::new(c.x + ux * hi, c.y + uy * hi),
+        votes: ids.len() as u32,
+    }
+}
+

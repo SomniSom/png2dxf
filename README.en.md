@@ -201,6 +201,20 @@ and batch processing across files (`rayon`).
 For Kubernetes: `--memory=2g --cpus=2`, `readinessProbe`/`livenessProbe` on
 `/healthz`, and an ingress body limit with a timeout of at least 30 s for large scans.
 
+
+## What's new in 2.0
+
+* **Dashed lines via chains**: dashes are grouped by orientation and fitted
+  into a single line by least squares over their centers (`geom::dash_chains`).
+* **Pale colored lines**: saturation boosting now targets light tones
+  (`grayscale_colored`), so pale pink parcel boundaries reach binarization.
+* **Note paragraphs are masked out** of the raster before detection
+  (`drop_block_areas`): blocks of 3+ lines no longer produce artifact segments.
+* **Subpixel refinement** (`refine_segments`): every segment is shifted onto the
+  actual stroke axis via an intensity profile — better dimensional accuracy.
+* **Synthetic ground truth for tests**: `png2dxf gen-test-image out.png 1600 1100`
+  renders a procedural sheet with known geometry, so no licensed scans are needed.
+
 ## Development
 
 ```bash
