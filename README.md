@@ -1,11 +1,16 @@
-# png2dxf — векторизация растровых чертежей в DXF
+# png2dxf — raster drawing to DXF vectorizer
 
-Rust-сервис: принимает скан/экспорт чертежа (PNG, JPG, TIFF, BMP, WebP),
-возвращает DXF R2013 (AC1027) с отрезками, дугами, окружностями и полилиниями
-в реальных миллиметрах. Есть HTTP API и CLI, один Docker-образ без OpenCV,
-Python и внешних сервисов — все вычисления на Rust.
+A Rust service that takes a scanned or exported drawing (PNG, JPG, TIFF, BMP, WebP)
+and returns DXF R2013 (AC1027) with lines, arcs, circles and polylines in real
+millimetres. Ships an HTTP API and a CLI in one Docker image — no OpenCV, no Python,
+no external services.
 
-## Быстрый старт
+- [Русская версия](README.ru.md)
+- [Quick start](#quick-start)
+- [API](#api)
+- [How it works](#how-it-works)
+
+## Quick start
 
 ```bash
 docker build -t png2dxf:latest .
@@ -21,10 +26,10 @@ curl -s -o out.dxf \
   http://localhost:8080/v1/vectorize
 ```
 
-Отдаётся сразу DXF (`Content-Type: application/dxf`), статистика — в заголовке
-`X-Stats` (число сущностей, масштаб, время обработки).
+The response is the DXF itself (`Content-Type: application/dxf`); statistics are in
+the `X-Stats` header (entity counts, scale, processing time).
 
-### CLI без сервера
+### CLI without the server
 
 ```bash
 docker run --rm -v "$PWD:/data" png2dxf:latest /data/scan.png /data/scan.dxf --dpi 300
@@ -34,17 +39,17 @@ docker run --rm -v "$PWD:/data" png2dxf:latest /data/scan.png /data/scan.dxf \
 
 ## API
 
-| Метод | Путь | Назначение |
+| Method | Path | Purpose |
 |---|---|---|
-| POST | `/v1/vectorize` | один файл → один DXF или ZIP |
-| POST | `/v1/vectorize/batch` | несколько `file` в одном запросе → ZIP |
-| POST | `/v1/vectorize` + `Content-Type: application/json` | `{"image_base64": "...", "params": {...}}` |
-| GET | `/healthz` | живость для healthcheck |
-| GET | `/v1/schema` | дефолты и описание всех параметров |
-| OPTIONS | * | CORS-preflight |
+| POST | `/v1/vectorize` | one file → one DXF or ZIP |
+| POST | `/v1/vectorize/batch` | several `file` fields → ZIP |
+| POST | `/v1/vectorize` with `Content-Type: application/json` | `{"image_base64": "...", "params": {...}}` |
+| GET | `/healthz` | liveness probe |
+| GET | `/v1/schema` | defaults and description of every parameter |
+| OPTIONS | * | CORS preflight |
 
-Параметры передаются multipart-полем `params` (JSON) либо ключом `params`
-в JSON-запросе. Все поля необязательны.
+Parameters travel in the multipart field `params` (JSON) or under the `params` key
+of a JSON request. All fields are optional.
 
 ```json
 {
@@ -65,6 +70,12 @@ docker run --rm -v "$PWD:/data" png2dxf:latest /data/scan.png /data/scan.dxf \
   "short_stroke_px": 4,
   "flip_y": true,
   "include_debug": false,
+  "color_boost": true,
+  "drop_text": false,
+  "ocr": true,
+  "ocr_lang": "rus",
+  "ocr_min_conf": 35,
+  "ocr_upscale": 2,
   "layers": {
     "lines": "Линии",
     "circles": "Окружности",
@@ -75,118 +86,127 @@ docker run --rm -v "$PWD:/data" png2dxf:latest /data/scan.png /data/scan.dxf \
 }
 ```
 
-### Масштаб
+### Scale
 
-Без масштаба чертёж в смету не годится, поэтому сервис **не угадывает** его.
+A drawing without a scale is useless for estimates, so the service **never guesses**
+it.
 
-* `scale` — две точки известной размерной линии в пикселях и её длина в мм:
-  `scale = mm / |px2 − px1|`. Приоритетный вариант, точность зависит только
-  от того, как вы указали точки.
-* `dpi` — масштаб от разрешения скана: `мм/px = 25.4 / dpi`. Быстрый вариант,
-  когда скан делали с известным DPI и без пересжатия геометрии.
-* Если не задано ни то, ни другое — `422 no_geometry`/«не задан масштаб».
+* `scale` — two points of a known dimension line in pixels plus its real length in mm:
+  `scale = mm / |px2 − px1|`. The preferred option; accuracy depends only on the
+  points you supply.
+* `dpi` — scale from scan resolution: `mm/px = 25.4 / dpi`. Fast path when the scan was
+  made at a known DPI without geometric resampling.
+* If neither is given the request fails with `422` / "scale is not set".
 
-Y переворачивается (`flip_y`), потому что в растре ось Y идёт вниз, а в CAD —
-вверх. Углы дуг при перевороте зеркалятся и меняются местами.
+Y is flipped (`flip_y`) because raster Y grows downwards while CAD Y grows upwards.
+Arc angles are mirrored and swapped when flipping.
 
-### Коды ошибок
+### Error codes
 
-| Код | `error` | Когда |
+| Code | `error` | When |
 |---|---|---|
-| 413 | `payload_too_large`, `too_large`, `too_many_files` | тело больше `MAX_BODY_MB`, `max_pixels` превышен, > `MAX_BATCH` файлов |
-| 415 | `bad_content_type` | нет `multipart/form-data` с boundary |
-| 422 | `bad_image`, `bad_json`, `bad_params`, `no_file`, `no_geometry` | файл не декодируется, кривой JSON, нет поля `file`, пустая геометрия |
-| 500 | `internal` | внутренняя ошибка обработки |
+| 413 | `payload_too_large`, `too_large`, `too_many_files` | body over `MAX_BODY_MB`, `max_pixels` exceeded, more than `MAX_BATCH` files |
+| 415 | `bad_content_type` | no `multipart/form-data` with a boundary |
+| 422 | `bad_image`, `bad_json`, `bad_params`, `no_file`, `no_geometry` | file cannot be decoded, malformed JSON, missing `file` field, empty geometry |
+| 500 | `internal` | internal processing error |
 
-## Как это работает
+## How it works
 
 ```
-PNG/JPG/TIFF ─ decode (crate image)
-  → grayscale (RGBA + альфа на белом)
-  → гауссов blur (σ из параметра)
-  → адаптивная бинаризация по интегральному изображению
-  → морфологическая чистка (open+close 1px)
-  → скелетизация Zhang–Suen (1px)
-  → восстановление прямых Хафом по (rho, theta) с NMS и параллельным
-    голосованием по полосам (rayon)
-  → «остаточный» скелет: вычитаем уже найденные прямые
-  → обход цепочек скелета (8-связность, приоритет продолжения по направлению)
-  → упрощение Дугласом–Пекером
-  → вписывание окружностей/дуг алгебраическим МНК (Kasa) + проверка покрытия
-  → нарезка в X/T-узлах (аналог shapely unary_union) и слияние коллинеарных
-  → DXF R2013: LINE / ARC / CIRCLE / LWPOLYLINE, слои, переворот Y
+PNG/JPG/TIFF ─ decode (image crate)
+  → grayscale (RGBA composited over white, optional colour boost)
+  → Gaussian blur (σ from parameters)
+  → adaptive binarization via integral image
+  → morphological cleanup (open+close 1px)
+  → text mask (small glyph-like components) — used for OCR, optionally removed
+  → Zhang–Suen thinning (1px)
+  → line recovery with a Hough transform over (rho, theta), NMS and parallel
+    voting across bands (rayon)
+  → LSD-style gradient line tracing on the blurred grayscale
+  → residual skeleton: already recovered lines are subtracted
+  → skeleton chain tracing (8-connectivity, direction-priority walking)
+  → Douglas–Peucker simplification
+  → circle/arc fitting by algebraic least squares (Kasa) + coverage check
+  → dash merging, splitting in X/T nodes (shapely unary_union analogue),
+    collinear merging
+  → OCR of the text mask with Tesseract (two passes + block pass)
+  → DXF R2013: LINE / ARC / CIRCLE / LWPOLYLINE / TEXT, layers, Y flip
 ```
 
-Ключевые отличия от OpenCV-пайплайна из наброска:
+Key differences from the classic OpenCV pipeline:
 
-* **Без shapely**: пересечения ищутся через пространственную сетку
-  (`split_at_intersections`), слияние коллинеарных — своё (`merge_collinear`).
-  Прямые режутся в узлах, поэтому контуры «сшиваются» как линии CAD.
-* **Без OpenCV**: бинаризация, скелет и Хаф реализованы на Rust, образ не тянет
-  `libopencv` (~300 МБ) и C++-тулчейн на билде.
-* **Дуги, а не «ломаная из 100 точек»**: цепочки скелета проверяются на
-  пригодность окружности (невязка Kasa + доля покрытого угла), поэтому кольца
-  дают `CIRCLE`, частичные — `ARC`.
-* **Мусор отсекается дважды**: по длине/голосам при отборе сегментов и по
-  плотности чернил вдоль найденной прямой.
-* **Детекция от пика, а не от общего числа чернил** (версия 0.3): каждый пиксель
-  голосует за `(rho, theta)`, пик аккумулятора разворачивается обратно в
-  пиксели полосы `hough_band_px`, сортируется вдоль прямой, а разрывы до
-  `max_gap_px` склеиваются. На реальном скане это подняло максимальную длину
-  линии с 13 до 545 px.
+* **No shapely**: intersections are found through a spatial grid
+  (`split_at_intersections`) and collinear merging is implemented in-house
+  (`merge_collinear`). Lines are split at nodes, so contours join like CAD lines.
+* **No OpenCV**: binarization, skeletonization and the Hough transform are pure Rust;
+  the image does not pull `libopencv` (~300 MB) or a C++ toolchain.
+* **Peak-based detection, not total-ink thresholds**: every ink pixel votes for
+  `(rho, theta)`, the accumulator peak is expanded back into the pixels of a
+  `hough_band_px` strip, sorted along the line, and gaps up to `max_gap_px` are
+  bridged. On real scans this raised the longest recovered line from 13 to 545 px.
+* **LSD-style tracing** (`src/lines.rs`): gradient orientation plus level-following
+  growth, so thin and dashed lines survive where the Hough transform yields fragments.
+* **Arcs instead of 100-point polylines**: skeleton chains are validated as circles
+  (Kasa residual + covered angle), so rings become `CIRCLE` and partial arcs `ARC`.
+* **Garbage is filtered twice**: by length/votes when selecting segments and by ink
+  density along the recovered line.
 
-## Слои DXF
+## DXF layers
 
-По умолчанию: `Линии` (7), `Окружности` (1), `Дуги` (3), `Полилинии` (5),
-`Каркас` (8, только при `include_debug`). Имена переопределяются в `layers`.
-Все координаты — мм, `$INSUNITS = 4`.
+Defaults: `Линии` (7), `Окружности` (1), `Дуги` (3), `Полилинии` (5), `Текст` (2),
+`Каркас` (8, only with `include_debug`). Names are overridable in `layers`.
+All coordinates are in mm, `$INSUNITS = 4`.
 
-## Производительность
+## Performance
 
-Замеры на 2 vCPU (`WORKERS=2`):
+Measured on 2 vCPU (`WORKERS=2`):
 
-| Вход | Время |
+| Input | Time |
 |---|---|
-| план 1600×1200 PNG, 22 КБ | ≈115 мс |
-| чертёж 1350×1065 PNG, 500 КБ | ≈120 мс |
-| тот же чертёж ×3 (4050×3195, ~30 Мп) | ≈900 мс |
+| plan 1600×1200 PNG, 22 KB | ≈115 ms |
+| drawing 1350×1065 PNG, 500 KB | ≈120 ms |
+| same drawing ×3 (4050×3195, ~30 MP) | ≈900 ms |
+| OCR adds | ≈1–2 s per sheet |
 
-Память контейнера в простое — около 80 МБ. Голосование Хафа параллелится по
-полосам изображения, пакетная обработка — по файлам (`rayon`).
+Idle container memory is about 80 MB. Hough voting is parallelised across image bands
+and batch processing across files (`rayon`).
 
-## Ограничения
+## Limitations
 
-* **OCR есть, но с ошибками.** Tesseract (`-l rus`, два прохода + блочный
-  режим) кладёт надписи в слой `Текст`. На ГОСТ-шрифтах часть символов
-  путается (`Ф`→`$`, `В`→`8`), плотные примечания читаются по колонкам.
-  Регулируется `ocr` / `ocr_min_conf` / `ocr_upscale`; без tesseract в образе
-  слой пуст, геометрия не страдает.
-* **Раскладка по смыслу** (`Стены`/`Размеры`/`Оси`) не делается: для этого
-  нужна семантика, а не геометрия. Сейчас слои по типу примитива.
-* **Дуги** восстанавливаются для чистых сканов; на размазанных дугах с обрывами
-  часть остаётся полилиниями (это честнее, чем «почти окружность»).
-* **Сетка и штриховка** дают много коротких линий. Помогают `min_line_px`,
-  `short_stroke_px` и `min_line_mm`.
-* **А4+ в 600 dpi** упирается в лимит `MAX_BODY_MB` и память: поднимайте
-  `MAX_BODY_MB`, `WORKERS` и `max_pixels` под железо.
-* PDF не принимается: сначала растеризуйте страницу (например, `pdftoppm -r 300`).
+* **OCR works but is imperfect.** Tesseract (`-l rus`, two passes + block mode) writes
+  labels to the `Текст` layer. On GOST drafting fonts some characters are confused
+  (`Ф`→`$`, `В`→`8`) and dense notes are read column by column. Tune with
+  `ocr` / `ocr_min_conf` / `ocr_upscale`; without `tesseract` in the image the layer is
+  empty and geometry is unaffected.
+* **Semantic layers** (`Walls`/`Dimensions`/`Axes`) are not produced: that needs
+  semantics, not geometry. Layers are grouped by primitive type.
+* **Arcs** are recovered for clean scans; on smeared arcs with breaks some remain
+  polylines (which is more honest than "almost a circle").
+* **Grids and hatching** produce many short segments. Use `min_line_px`,
+  `short_stroke_px` and `min_line_mm`.
+* **A4+ at 600 dpi** hits `MAX_BODY_MB` and memory limits: raise `MAX_BODY_MB`,
+  `WORKERS` and `max_pixels` for your hardware.
+* PDF is not accepted: rasterise the page first (e.g. `pdftoppm -r 300`).
 
-## Конфигурация
+## Configuration
 
-| Переменная | По умолчанию | Смысл |
+| Variable | Default | Meaning |
 |---|---|---|
-| `LISTEN_ADDR` | `0.0.0.0:8080` | адрес сервера |
-| `WORKERS` | число CPU | потоков rayon |
-| `MAX_BODY_MB` | `64` | лимит multipart-тела |
-| `MAX_BATCH` | `8` | файлов в пакете |
-| `MODE` | `serve` | `serve` без аргументов запускает API |
+| `LISTEN_ADDR` | `0.0.0.0:8080` | server address |
+| `WORKERS` | CPU count | rayon thread pool size |
+| `MAX_BODY_MB` | `64` | multipart body limit |
+| `MAX_BATCH` | `8` | files per batch |
+| `MODE` | `serve` | `serve` runs the API when no arguments are given |
 
-Для Kubernetes: `--memory=2g --cpus=2`, `readinessProbe`/`livenessProbe` на
-`/healthz`, за ingress — лимит тела и таймаут ≥ 30 с на большие сканы.
+For Kubernetes: `--memory=2g --cpus=2`, `readinessProbe`/`livenessProbe` on
+`/healthz`, and an ingress body limit with a timeout of at least 30 s for large scans.
 
-## Разработка
+## Development
 
 ```bash
-cargo test             # юнит-тесты: геометрия, DXF, Хаф, LSD, ZIP, multipart, base64, OCR
+cargo test             # unit tests: geometry, DXF, Hough, LSD, ZIP, multipart, base64, OCR
 cargo build --release
 ```
+
+OCR requires the `tesseract` binary with the `rus` language pack at runtime; it is
+installed in the Docker image.
