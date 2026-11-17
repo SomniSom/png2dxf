@@ -215,6 +215,20 @@ For Kubernetes: `--memory=2g --cpus=2`, `readinessProbe`/`livenessProbe` on
 * **Synthetic ground truth for tests**: `png2dxf gen-test-image out.png 1600 1100`
   renders a procedural sheet with known geometry, so no licensed scans are needed.
 
+
+## Output formats
+
+`format` in the JSON params (or `--format`, or the output file extension in the CLI):
+`dxf` (default), `svg`, `obj`.
+
+* **DXF** — the main format, R2013, `Standard` style with a `Liberation Sans`
+  TTF (Cyrillic renders in LibreCAD/QCAD/nanoCAD), text written as `\U+XXXX`.
+* **SVG** — opens in any browser and in Inkscape with no setup, system font,
+  Y axis pointing down like the raster.
+* **OBJ** — the Blender bridge: `File → Import → Wavefront (.obj)`, geometry as
+  lines (`l`), coordinates in mm. OBJ has no text support — annotations are
+  written as comments at the top of the file.
+
 ## Development
 
 ```bash

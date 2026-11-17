@@ -15,6 +15,7 @@ mod dxf;
 mod geom;
 mod lines;
 mod ocr;
+mod obj;
 mod params;
 mod pipeline;
 mod preprocess;

@@ -46,6 +46,15 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
                 o.params.ocr = false;
                 i += 1;
             }
+            "--format" => {
+                let v = args.get(i + 1).ok_or("--format требует значение")?;
+                let v = v.trim().to_ascii_lowercase();
+                if !matches!(v.as_str(), "dxf" | "svg" | "obj") {
+                    return Err("--format: допустимо dxf, svg или obj".into());
+                }
+                o.format = v;
+                i += 2;
+            }
             "--drop-text" => {
                 o.params.drop_text = true;
                 i += 1;
@@ -107,6 +116,7 @@ png2dxf — векторизация растровых чертежей в DXF
   --ocr-off                         не запускать OCR
   --drop-text                       вычищать подписи перед векторизацией
   --no-color-boost                  не усиливать цветные линии
+  --format <dxf|svg|obj>            формат вывода (по умолчанию dxf)
   --debug                           добавить слой 'Каркас' со скелетом
   -h, --help                        эта справка
 ";
@@ -116,6 +126,8 @@ pub struct Options {
     pub input: PathBuf,
     pub output: PathBuf,
     pub params: Params,
+    /// Формат вывода: dxf | svg | obj
+    pub format: String,
 }
 
 impl Default for Options {
@@ -124,6 +136,7 @@ impl Default for Options {
             input: PathBuf::from("in.png"),
             output: PathBuf::from("output.dxf"),
             params: Params::default(),
+            format: "dxf".to_string(),
         }
     }
 }
@@ -132,12 +145,34 @@ pub fn run(opts: &Options) -> Result<(), String> {
     let bytes = std::fs::read(&opts.input)
         .map_err(|e| format!("не удалось прочитать {}: {e}", opts.input.display()))?;
     let out = pipeline::vectorize_bytes(&bytes, &opts.params).map_err(|e| e.message)?;
-    std::fs::write(&opts.output, &out.dxf)
+    let format = if opts.format != "dxf" {
+        opts.format.clone()
+    } else {
+        // Явно не задан — смотрим на расширение: out.svg / out.obj.
+        match opts
+            .output
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("svg") => "svg".to_string(),
+            Some("obj") => "obj".to_string(),
+            _ => "dxf".to_string(),
+        }
+    };
+    let body = match format.as_str() {
+        "svg" => &out.svg,
+        "obj" => &out.obj,
+        _ => &out.dxf,
+    };
+    std::fs::write(&opts.output, body)
         .map_err(|e| format!("не удалось записать {}: {e}", opts.output.display()))?;
     println!(
-        "{} → {}: {} линий, {} полилиний, {} дуг, {} окружностей, масштаб {:.6} мм/px, {} мс",
+        "{} → {} ({}): {} линий, {} полилиний, {} дуг, {} окружностей, масштаб {:.6} мм/px, {} мс",
         opts.input.display(),
         opts.output.display(),
+        format.to_ascii_uppercase(),
         out.stats.lines,
         out.stats.polylines,
         out.stats.arcs,

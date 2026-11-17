@@ -341,7 +341,13 @@ fn run_single(
 ) -> Resp {
     match pipeline::vectorize_bytes(&bytes, &params) {
         Ok(out) => {
-            let name = format!("{}.dxf", stem(original_name));
+            let format = params.format.clone();
+            let (body, ext, ctype) = match format.as_str() {
+                "svg" => (out.svg.clone(), ".svg", "image/svg+xml"),
+                "obj" => (out.obj.clone(), ".obj", "text/plain; charset=utf-8"),
+                _ => (out.dxf.clone(), ".dxf", "application/dxf"),
+            };
+            let name = format!("{}{}", stem(original_name), ext);
             let stats_hdr = serde_json::json!({
                 "lines": out.stats.lines,
                 "polylines": out.stats.polylines,
@@ -351,21 +357,23 @@ fn run_single(
                 "width_px": out.stats.width_px,
                 "height_px": out.stats.height_px,
                 "elapsed_ms": out.elapsed_ms,
+                "format": format,
+                "texts": out.texts.len(),
             })
             .to_string();
             if want_zip {
                 let zip = crate::zip::build_zip(&[NamedEntry {
                     name: name.clone(),
-                    data: out.dxf.into_bytes(),
+                    data: body.clone().into_bytes(),
                 }]);
                 cors(tiny_http::Response::from_data(zip)
                     .with_header(header("Content-Type", "application/zip"))
                     .with_header(disposition(&stem(original_name), ".zip"))
                     .with_header(header("X-Stats", &stats_hdr)))
             } else {
-                cors(tiny_http::Response::from_data(out.dxf.into_bytes())
-                    .with_header(header("Content-Type", "application/dxf"))
-                    .with_header(disposition(&stem(original_name), ".dxf"))
+                cors(tiny_http::Response::from_data(body.into_bytes())
+                    .with_header(header("Content-Type", ctype))
+                    .with_header(disposition(&stem(original_name), ext))
                     .with_header(header("X-Stats", &stats_hdr)))
             }
         }

@@ -8,6 +8,8 @@ use std::time::Instant;
 
 pub struct Output {
     pub dxf: String,
+    pub svg: String,
+    pub obj: String,
     pub stats: Stats,
     pub elapsed_ms: u64,
     /// Надписи, найденные OCR-движком (если он доступен), в координатах растра.
@@ -202,6 +204,8 @@ pub fn vectorize_bytes(bytes: &[u8], params: &Params) -> Result<Output, Error> {
     }
     Ok(Output {
         dxf: built.dxf,
+        svg: built.svg,
+        obj: crate::obj::to_obj(&data, params, h, scale, &texts),
         stats: built.stats,
         elapsed_ms: started.elapsed().as_millis() as u64,
         texts,

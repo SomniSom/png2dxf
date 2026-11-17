@@ -90,6 +90,27 @@ impl DxfWriter {
             code(&mut self.buf, 6, l.linetype);
         }
         code(&mut self.buf, 0, "ENDTAB");
+
+        // STYLE: стиль Standard с SHX-шрифтом и big-font для кириллицы.
+        // Без этой таблицы TEXT со ссылкой на Standard рисуется дефолтным
+        // шрифтом, который кириллицу не содержит — отсюда «кружочки».
+        code(&mut self.buf, 0, "TABLE");
+        code(&mut self.buf, 2, "STYLE");
+        code(&mut self.buf, 70, "1");
+        code(&mut self.buf, 0, "STYLE");
+        code(&mut self.buf, 2, "Standard");
+        code(&mut self.buf, 70, "0");
+        code(&mut self.buf, 40, "0.0");
+        code(&mut self.buf, 41, "1.0");
+        code(&mut self.buf, 50, "0.0");
+        code(&mut self.buf, 71, "0");
+        code(&mut self.buf, 42, "2.5");
+        // TTF вместо SHX: LibreCAD не грузит SHX-шрифты AutoCAD и рисует
+        // кириллицу пустыми глифами («кружочки»). TTF с поддержкой кириллицы
+        // работает и в LibreCAD, и в QCAD, и в nanoCAD. Big-font (код 4)
+        // для TTF не нужен и не пишется.
+        code(&mut self.buf, 3, "Liberation Sans");
+        code(&mut self.buf, 0, "ENDTAB");
         code(&mut self.buf, 0, "ENDSEC");
 
         code(&mut self.buf, 0, "SECTION");
@@ -119,7 +140,7 @@ impl DxfWriter {
         code(&mut self.buf, 20, &num(y));
         code(&mut self.buf, 30, "0");
         code(&mut self.buf, 40, &num(height.max(0.1)));
-        code(&mut self.buf, 1, value);
+        code(&mut self.buf, 1, &escape_text(value));
         code(&mut self.buf, 7, "Standard");
         if rotation_deg.abs() > 1e-9 {
             code(&mut self.buf, 50, &num(rotation_deg.rem_euclid(360.0)));
@@ -178,6 +199,28 @@ impl DxfWriter {
     pub fn layer_count(&self) -> usize {
         self.layer_count
     }
+}
+
+/// Экранирует текст для DXF: не-ASCII символы пишутся как `\U+XXXX`.
+///
+/// Так кириллица читается в AutoCAD, BricsCAD и nanoCAD независимо от
+/// кодовой страницы файла — у R2013 она не задана, и «сырой» UTF-8 в
+/// сущности TEXT даёт мусор в старых зрителях.
+fn escape_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() * 2);
+    for ch in value.chars() {
+        match ch {
+            c if c.is_ascii() && !c.is_control() => out.push(c),
+            c if c.is_control() => out.push(' '),
+            c => {
+                let mut buf = [0u16; 2];
+                for unit in c.encode_utf16(&mut buf) {
+                    out.push_str(&format!("\\U+{:04X}", unit));
+                }
+            }
+        }
+    }
+    out
 }
 
 impl Default for DxfWriter {

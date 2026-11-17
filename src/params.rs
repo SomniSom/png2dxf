@@ -24,6 +24,8 @@ pub struct Params {
     pub lsd_threshold: f32,
     pub lsd_min_len_px: f32,
     pub drop_text: bool,
+    /// Формат ответа API: dxf | svg | obj
+    pub format: String,
     pub subpixel_refine: bool,
     pub color_boost: bool,
     pub ocr: bool,
@@ -84,6 +86,7 @@ impl Default for Params {
             lsd_threshold: 30.0,
             lsd_min_len_px: 25.0,
             drop_text: false,
+            format: "dxf".to_string(),
             subpixel_refine: true,
             color_boost: true,
             ocr: true,
@@ -119,6 +122,8 @@ impl Params {
         self.hough_threshold_min = self.hough_threshold_min.clamp(3, 10_000);
         self.hough_band_px = self.hough_band_px.clamp(0.7, 10.0);
         self.ocr_min_conf = self.ocr_min_conf.clamp(0.0, 100.0);
+        let f = self.format.trim().to_ascii_lowercase();
+        self.format = if matches!(f.as_str(), "dxf" | "svg" | "obj") { f } else { "dxf".into() };
         self.ocr_upscale = self.ocr_upscale.clamp(1, 4);
         self.lsd_threshold = self.lsd_threshold.clamp(5.0, 400.0);
         self.lsd_min_len_px = self.lsd_min_len_px.clamp(5.0, 1000.0);

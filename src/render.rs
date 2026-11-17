@@ -38,6 +38,7 @@ impl Transform {
 
 pub struct Built {
     pub dxf: String,
+    pub svg: String,
     pub stats: Stats,
 }
 
@@ -134,6 +135,10 @@ pub fn build(
         }
     }
 
+    // SVG: та же геометрия в миллиметрах, но с осью Y вниз (как в растре)
+    // и шрифтом без проблем кодеков — текст читается в любом браузере.
+    let svg = to_svg(data, px, &t, texts);
+
     let stats = Stats {
         width_px,
         height_px,
@@ -145,7 +150,184 @@ pub fn build(
         dropped_short: data.dropped_short,
         chain_points: data.chain_points,
     };
-    Built { dxf: w.finish(), stats }
+    Built { dxf: w.finish(), svg, stats }
+}
+
+/// SVG-вывод: та же геометрия, но с осью Y вниз (как в растре) и TTF-шрифтом.
+///
+/// SVG не зависит от кодеков DXF и шрифтовых файлов CAD — открывается
+/// в браузере и в Inkscape без настроек, кириллица рендерится системным шрифтом.
+fn to_svg(data: &VectorData, px: &Params, t: &Transform, texts: &[TextOut]) -> String {
+    use std::fmt::Write as _;
+    let height_mm = if px.flip_y { t.height * t.scale } else { t.height * t.scale };
+    let width_mm = pick_width(data, px, t);
+    let mut out = String::with_capacity(1 << 16);
+    let _ = writeln!(
+        out,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="{w}mm" height="{h}mm" viewBox="0 0 {w} {h}">
+<g fill="none" stroke-linecap="round" font-family="Liberation Sans, Arial, sans-serif">"#,
+        w = fmt(width_mm),
+        h = fmt(height_mm)
+    );
+
+    // В SVG ось Y вниз: координаты берём без переворота (как в растре), тогда
+    // картинка совпадает с исходным сканом.
+    let sy = |p: Pt| -> (f64, f64) { (p.x * t.scale, p.y * t.scale) };
+
+    let _ = writeln!(out, r##"<g stroke="#222" stroke-width="0.18">"##);
+    let min_len_mm = px.min_line_mm.max(0.0);
+    for s in &data.segs {
+        if s.len() * t.scale < min_len_mm {
+            continue;
+        }
+        let (x1, y1) = sy(s.a);
+        let (x2, y2) = sy(s.b);
+        let _ = writeln!(
+            out,
+            r#"<line x1="{}" y1="{}" x2="{}" y2="{}"/>"#,
+            fmt(x1),
+            fmt(y1),
+            fmt(x2),
+            fmt(y2)
+        );
+    }
+    let _ = writeln!(out, "</g>");
+
+    if !data.circles.is_empty() {
+        let _ = writeln!(out, r##"<g stroke="#c22" stroke-width="0.18">"##);
+        for c in &data.circles {
+            let (cx, cy) = sy(c.center);
+            let _ = writeln!(
+                out,
+                r#"<circle cx="{}" cy="{}" r="{}"/>"#,
+                fmt(cx),
+                fmt(cy),
+                fmt(c.radius * t.scale)
+            );
+        }
+        let _ = writeln!(out, "</g>");
+    }
+
+    if !data.arcs.is_empty() {
+        let _ = writeln!(out, r##"<g stroke="#2a7" stroke-width="0.18">"##);
+        for a in &data.arcs {
+            let (cx, cy) = sy(a.center);
+            let r = a.radius * t.scale;
+            // SVG-углы: 0° вправо, по часовой стрелке (ось Y вниз).
+            let (x1, y1) = (cx + r * a.start_rad.cos(), cy + r * a.start_rad.sin());
+            let (x2, y2) = (cx + r * a.end_rad.cos(), cy + r * a.end_rad.sin());
+            // Развёртка дуги без переворота Y противоположна DXF-углам.
+            let mut delta = a.end_rad - a.start_rad;
+            while delta > std::f64::consts::TAU {
+                delta -= std::f64::consts::TAU;
+            }
+            while delta < 0.0 {
+                delta += std::f64::consts::TAU;
+            }
+            let large = if delta > std::f64::consts::PI { 1 } else { 0 };
+            let _ = writeln!(
+                out,
+                r#"<path d="M {} {} A {} {} 0 {} 1 {} {}"/>"#,
+                fmt(x1),
+                fmt(y1),
+                fmt(r),
+                fmt(r),
+                large,
+                fmt(x2),
+                fmt(y2)
+            );
+        }
+        let _ = writeln!(out, "</g>");
+    }
+
+    if !data.polylines.is_empty() {
+        let _ = writeln!(out, r##"<g stroke="#35c" stroke-width="0.18">"##);
+        for p in &data.polylines {
+            if p.len() < 2 {
+                continue;
+            }
+            let _ = write!(out, r#"<polyline points=""#);
+            for (i, q) in p.iter().enumerate() {
+                let (x, y) = sy(*q);
+                if i > 0 {
+                    out.push(' ');
+                }
+                let _ = write!(out, "{},{}", fmt(x), fmt(y));
+            }
+            let _ = writeln!(out, r#""/>"#);
+        }
+        let _ = writeln!(out, "</g>");
+    }
+
+    if !texts.is_empty() {
+        let _ = writeln!(
+            out,
+            r##"<g fill="#080" stroke="none" font-size="{:.1}">"##,
+            (texts.first().map(|x| x.h_px).unwrap_or(3.0) * t.scale * 0.9).max(0.8)
+        );
+        for item in texts {
+            if item.text.trim().is_empty() {
+                continue;
+            }
+            // В SVG ось Y вниз, поэтому базовая линия — низ bbox.
+            let x = item.x_px * t.scale;
+            let y = (item.y_px + item.h_px * 0.85) * t.scale;
+            let _ = writeln!(
+                out,
+                r#"<text x="{}" y="{}">{}</text>"#,
+                fmt(x),
+                fmt(y),
+                escape_xml(&item.text)
+            );
+        }
+        let _ = writeln!(out, "</g>");
+    }
+
+    let _ = writeln!(out, "</g>\n</svg>");
+    out
+}
+
+fn pick_width(data: &VectorData, px: &Params, t: &Transform) -> f64 {
+    let mut max_x: f64 = 0.0;
+    for s in &data.segs {
+        max_x = max_x.max(s.a.x).max(s.b.x);
+    }
+    for c in &data.circles {
+        max_x = max_x.max(c.center.x + c.radius);
+    }
+    let _ = px;
+    if max_x > 0.0 {
+        (max_x + 2.0) * t.scale
+    } else {
+        t.height * t.scale
+    }
+}
+
+fn fmt(v: f64) -> String {
+    let s = format!("{v:.3}");
+    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    if s.is_empty() || s == "-0" {
+        "0".to_string()
+    } else {
+        s
+    }
+}
+
+fn escape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c if c.is_control() => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
